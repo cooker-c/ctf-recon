@@ -23,3 +23,7 @@ ctf-agent = "agent:app"
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "mypy>=1.8"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["core*", "modules*", "tools*", "utils*"]
