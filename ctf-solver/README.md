@@ -9,16 +9,46 @@ CTF-Agent is a modular command-line helper that runs common CTF analysis techniq
 - Extensible design so you can drop in new modules and tools later
 
 ## Quickstart
-1. Create a virtual environment and install dependencies:
-   ```bash
-   python -m venv .venv
-   .venv/Scripts/activate  # Windows
-   pip install -e .
-   ```
-2. Run the analyzer on a file:
-   ```bash
-   ctf-agent analyze path/to/challenge.bin
-   ```
+1. Clone and enter the project:
+  ```bash
+  git clone https://github.com/cooker-c/ctf-solver.git
+  cd ctf-solver/ctf-solver
+  ```
+2. Create and activate a virtual environment:
+  ```bash
+  python3 -m venv .venv
+  source .venv/bin/activate  # Linux/Kali
+  ```
+  ```powershell
+  py -m venv .venv
+  .venv\Scripts\Activate.ps1  # Windows PowerShell
+  ```
+3. Install all Python dependencies in one step:
+  ```bash
+  python -m pip install --upgrade pip
+  pip install -e .
+  ```
+4. Optional but recommended external tools:
+  ```bash
+  sudo apt update
+  sudo apt install -y binwalk exiftool binutils file
+  ```
+5. Run the analyzer on a file:
+  ```bash
+  ctf-agent analyze path/to/challenge.bin
+  ```
+
+## One-command setup (Kali/Linux)
+From the project root:
+```bash
+python3 -m venv .venv && source .venv/bin/activate && python -m pip install --upgrade pip && pip install -e . && sudo apt update && sudo apt install -y binwalk exiftool binutils file
+```
+
+## Verify installation
+```bash
+ctf-agent version
+python -c "import agent, config, core, modules, tools, utils; print('imports-ok')"
+```
 
 ## CLI
 - Analyze a file with selected modules:
@@ -49,6 +79,7 @@ Environment variables (prefixed with `CTF_AGENT_`) override defaults:
 ## Notes
 - External tools (`strings`, `binwalk`, `exiftool`) are optional; the agent falls back when missing.
 - Extracted artifacts can be written under `extracted/` as modules grow.
+- If you update dependencies later, run `pip install -e .` again in the same virtual environment.
 
 ## Roadmap
 - Add AI-assisted module selection and pattern learning

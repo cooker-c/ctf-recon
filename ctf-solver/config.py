@@ -3,7 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import List
 
-from pydantic import BaseSettings, Field
+from pydantic import Field
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class AppConfig(BaseSettings):
@@ -11,7 +12,4 @@ class AppConfig(BaseSettings):
     enabled_modules: List[str] = Field(default_factory=lambda: [])
     output_dir: Path = Path("extracted")
     timeout: int = 30
-
-    class Config:
-        env_prefix = "CTF_AGENT_"
-        case_sensitive = False
+    model_config = SettingsConfigDict(env_prefix="CTF_AGENT_", case_sensitive=False)

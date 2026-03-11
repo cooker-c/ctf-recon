@@ -13,6 +13,7 @@ dependencies = [
     "typer>=0.12",
     "rich>=13.0",
     "pydantic>=2.6",
+    "pydantic-settings>=2.2",
     "requests>=2.31",
     "python-magic-bin; platform_system == 'Windows'",
     "python-magic; platform_system != 'Windows'",
@@ -23,6 +24,9 @@ ctf-agent = "agent:app"
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "mypy>=1.8"]
+
+[tool.setuptools]
+py-modules = ["agent", "config"]
 
 [tool.setuptools.packages.find]
 where = ["."]
