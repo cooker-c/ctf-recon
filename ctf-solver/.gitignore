@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+*.swp
+.env
+.venv/
+venv/
+.idea/
+.vscode/
+.pytest_cache/
+.mypy_cache/
+.extracted/
+extracted/

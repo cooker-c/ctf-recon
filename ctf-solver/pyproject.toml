@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ctf-agent"
+version = "0.1.0"
+description = "Modular CLI for semi-automated CTF challenge analysis"
+readme = "README.md"
+authors = [{name = "CTF Agent"}]
+requires-python = ">=3.10"
+dependencies = [
+    "typer>=0.12",
+    "rich>=13.0",
+    "pydantic>=2.6",
+    "requests>=2.31",
+    "python-magic-bin; platform_system == 'Windows'",
+    "python-magic; platform_system != 'Windows'",
+]
+
+[project.scripts]
+ctf-agent = "agent:app"
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "mypy>=1.8"]
