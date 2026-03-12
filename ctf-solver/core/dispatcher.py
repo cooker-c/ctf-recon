@@ -63,9 +63,9 @@ class Dispatcher:
                 log.warning("Unknown module requested: %s", name)
                 continue
             if name == "forensics":
-                instances.append(cls(exif_tool=exif_tool, binwalk_tool=binwalk_tool))
+                instances.append(cls(exif_tool=exif_tool, binwalk_tool=binwalk_tool, runner=self.runner))
             elif name == "reversing":
-                instances.append(cls(strings_tool=strings_tool, binwalk_tool=binwalk_tool))
+                instances.append(cls(strings_tool=strings_tool, binwalk_tool=binwalk_tool, runner=self.runner))
             elif name == "crypto":
                 instances.append(cls())
             elif name == "stego":

@@ -111,7 +111,7 @@ Environment variables (prefixed with `CTF_AGENT_`) override defaults:
 
 ## Modules
 - Forensics: file metadata (magic), exif, binwalk scan
-- Reversing: strings extraction plus binwalk hints
+- Reversing: strings extraction plus binwalk, file/readelf/objdump/checksec, and gdb introspection (when available)
 - Crypto: heuristics for hex/base64 blobs
 - Stego: metadata plus entropy clue
 
