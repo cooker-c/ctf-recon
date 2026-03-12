@@ -192,7 +192,22 @@ def pipeline(
 
 @app.command(name="agent")
 def agent_command(
-    targets: List[Path] = typer.Argument(..., exists=True, readable=True, resolve_path=True, help="One or more challenge files"),
+    targets: Optional[List[Path]] = typer.Argument(
+        None,
+        exists=True,
+        readable=True,
+        resolve_path=True,
+        help="One or more challenge files (positional)",
+    ),
+    input: Optional[List[Path]] = typer.Option(
+        None,
+        "--input",
+        "-i",
+        exists=True,
+        readable=True,
+        resolve_path=True,
+        help="One or more challenge files (option form)",
+    ),
     modules: Optional[str] = typer.Option(None, help="Comma-separated module list (forensics,reversing,crypto,stego)"),
     flag_format: Optional[str] = typer.Option(None, help="Flag format hint (regex or known prefix)"),
     category: Optional[str] = typer.Option(None, help="Challenge category hint (pwn, web, rev, forensics, crypto, misc)"),
@@ -212,6 +227,16 @@ def agent_command(
     attachment_urls = attachment_url or []
     download_dir = Path("extracted/ingested")
 
+    # Combine positional and option-based inputs
+    final_targets: List[Path] = []
+    if targets:
+        final_targets.extend(targets)
+    if input:
+        final_targets.extend(input)
+    if not final_targets:
+        typer.echo("[red]No targets provided. Use positional targets or --input/-i.[/red]")
+        raise typer.Exit(code=1)
+
     if page_url:
         meta = ingest_from_url(page_url, attachment_urls if attachment_urls else None, download_dir)
         # Merge manual hints
@@ -219,15 +244,15 @@ def agent_command(
         meta.category = category or meta.category
         meta.description = description or meta.description
         # Append downloaded attachments to targets
-        targets = targets + [Path(p) for p in meta.attachments]
+        final_targets = final_targets + [Path(p) for p in meta.attachments]
     else:
         meta = ChallengeMetadata(
             source_url=None,
-            title=targets[0].name if targets else "challenge",
+            title=final_targets[0].name if final_targets else "challenge",
             category=category,
             description=description,
             flag_format=flag_format,
-            attachments=targets,
+            attachments=final_targets,
         )
 
     patterns = list(cfg.flag_patterns)
@@ -236,7 +261,7 @@ def agent_command(
 
     agent = AIAgent(max_workers=max_workers)
     results = agent.orchestrate(
-        targets=targets,
+        targets=final_targets,
         metadata=meta,
         enabled_modules=enabled or None,
         timeout=timeout or cfg.timeout,
