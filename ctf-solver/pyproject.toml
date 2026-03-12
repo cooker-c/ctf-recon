@@ -15,6 +15,7 @@ dependencies = [
     "pydantic>=2.6",
     "pydantic-settings>=2.2",
     "requests>=2.31",
+    "beautifulsoup4>=4.12",
     "python-magic-bin; platform_system == 'Windows'",
     "python-magic; platform_system != 'Windows'",
 ]
@@ -30,4 +31,4 @@ py-modules = ["agent", "config"]
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["core*", "modules*", "tools*", "utils*"]
+include = ["core*", "modules*", "tools*", "utils*", "ingestion*", "orchestration*", "coordination*", "execution*", "output*"]

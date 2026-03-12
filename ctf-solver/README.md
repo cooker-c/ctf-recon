@@ -9,6 +9,8 @@ CTF-Agent is a modular command-line helper that runs common CTF analysis techniq
 - Scores flag candidates and separates them into confirmed/probable/noise buckets
 - Supports JSON report output for repeatable triage and automation
 - Extensible design so you can drop in new modules and tools later
+- Layered architecture with structured message passing:
+  - Ingestion (web) → Orchestration → Execution (local/SSH) → Coordination (worker pool) → Output (submission)
 
 ## Quickstart
 1. Clone and enter the project:
@@ -38,6 +40,10 @@ CTF-Agent is a modular command-line helper that runs common CTF analysis techniq
 5. Run the analyzer on a file:
   ```bash
   ctf-agent analyze path/to/challenge.bin
+  ```
+6. Run the pipeline with metadata hints:
+  ```bash
+  ctf-agent pipeline path/to/challenge.bin --flag-format "flag{.*}" --category pwn --json-output extracted/report.json
   ```
 
 ## Safe workflow for unknown/vulnerable files (Linux/Kali)
@@ -79,6 +85,18 @@ python -c "import agent, config, core, modules, tools, utils; print('imports-ok'
 - Write machine-readable report and include low-confidence strings:
   ```bash
   ctf-agent analyze challenge.bin --json-output extracted/report.json --show-noise
+  ```
+- Full pipeline with metadata hints:
+  ```bash
+  ctf-agent pipeline challenge.bin --category rev --description "ELF, stripped" --flag-format "flag{[A-Za-z0-9_]+}" --json-output extracted/pipeline.json
+  ```
+- Agent fan-out across multiple files (parallel):
+  ```bash
+  ctf-agent agent challenge1.bin challenge2.bin --category pwn --flag-format "flag{.*}" --max-workers 4 --json-output extracted/agent.json
+  ```
+- Agent with ingestion (pull page + attachments):
+  ```bash
+  ctf-agent agent challenge.bin --page-url https://ctf.local/chal/123 --attachment-url https://ctf.local/files/chal123.zip --json-output extracted/agent.json
   ```
 - Show version:
   ```bash
