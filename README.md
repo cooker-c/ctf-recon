@@ -1,2 +1,3 @@
-# ctf-solver
-An automated system to perform widely used methods to solve common ctf challenges
+# CTF Recon
+
+LLM-guided recon pipeline for CTF files/URLs. Runs category-aware commands, captures outputs, and writes Markdown/JSON reports for manual solving with an LLM.
