@@ -17,82 +17,94 @@ import shutil
 import subprocess
 import sys
 import textwrap
-from datetime import datetime
-from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
-from urllib.parse import urlparse
+def build_llm_prompt_deep(
+    category: str,
+    target: str,
+    magic_desc: Optional[str],
+    sha: str,
+    observations: List[str],
+    outputs: Dict[str, Dict[str, str]],
+) -> str:
+    """Build rich prompt with all non-empty recon outputs; limit length."""
 
-# Default timeouts (seconds)
-COMMAND_TIMEOUT = 10
-EXEC_TIMEOUT = 5  # for ltrace/strace
+    def section_if_ok(name: str, key: str, max_lines: int = 100) -> Optional[str]:
+        res = outputs.get(key, {})
+        if res.get("status") != "ok":
+            return None
+        body = res.get("stdout", "").strip()
+        if not body:
+            return None
+        return f"[{name}]\n{truncate_lines(body, max_lines)}"
 
+    sections: List[str] = []
+    header = [
+        f"Category: {category}",
+        f"Target: {target}",
+        f"Type: {'URL' if is_url(target) else 'file'}",
+    ]
+    if magic_desc:
+        header.append(f"Magic: {magic_desc}")
+    if sha and sha != "N/A":
+        header.append(f"SHA256: {sha}")
+    if observations:
+        header.append("Observations: " + "; ".join(observations[:5]))
+    sections.append(" | ".join(header))
 
-def is_url(target: str) -> bool:
-    parsed = urlparse(target)
-    return bool(parsed.scheme and parsed.netloc)
+    for name, key in [
+        ("file", "file"),
+        ("checksec", "checksec"),
+        ("readelf", "readelf"),
+        ("objdump", "objdump"),
+        ("nm", "nm"),
+        ("rabin2_symbols", "rabin2_symbols"),
+        ("strings", "strings_full"),
+        ("strings_grep", "strings_grep"),
+        ("binwalk", "binwalk"),
+        ("exiftool", "exiftool"),
+        ("strace", "strace"),
+        ("ltrace", "ltrace"),
+        ("readelf", "readelf"),
+        ("rabin2_info", "rabin2_info"),
+    ]:
+        sec = section_if_ok(name, key)
+        if sec:
+            sections.append(sec)
 
+    # HTTP headers and page content
+    web_parts: List[str] = []
+    for key in ["curl_head", "curl_headers", "curl_grep", "whatweb", "robots", "git_head"]:
+        res = outputs.get(key, {})
+        if res.get("status") == "ok" and res.get("stdout"):
+            web_parts.append(truncate_lines(res["stdout"], 100))
+    if web_parts:
+        sections.append("[web]\n" + "\n---\n".join(web_parts))
 
-def sha256sum(path: Path) -> str:
-    h = hashlib.sha256()
-    with path.open("rb") as fh:
-        for chunk in iter(lambda: fh.read(8192), b""):
-            h.update(chunk)
-    return h.hexdigest()
+    # PCAP summaries
+    for key in ["tshark_summary", "tshark_http_uris", "tshark_follow"]:
+        res = outputs.get(key, {})
+        if res.get("status") == "ok" and res.get("stdout"):
+            sections.append(f"[{key}]\n" + truncate_lines(res["stdout"], 100))
 
+    # Encoding detection
+    enc = outputs.get("python_detect_encoding", {})
+    if enc.get("status") == "ok" and enc.get("stdout"):
+        sections.append("[encoding]\n" + truncate_lines(enc["stdout"], 100))
 
-def detect_category(target: str, provided: Optional[str], magic_desc: Optional[str]) -> str:
-    if provided:
-        return provided.lower()
-    if is_url(target):
-        return "web"
+    # Build final prompt with analyst instructions
+    instruction = (
+        "You are a CTF analyst. Analyze this recon data and extract:\n"
+        "1. VULNERABILITY INDICATORS - any functions, strings, protections, or patterns that suggest a specific vulnerability class\n"
+        "2. KEY FINDINGS - the most important observations from the recon (e.g. dangerous functions present, missing protections, hidden functions, suspicious metadata, encoded data detected)\n"
+        "3. BINARY PROFILE - summarize the target in one paragraph (architecture, protections, purpose, notable symbols)\n"
+        "4. ATTACK SURFACE - list every possible input vector found (argv, stdin, network, files, env vars, format strings etc)\n"
+        "5. RECOMMENDED TOOL SEQUENCE - ordered list of next tools to run with exact commands and expected output\n"
+        "6. SOLVE HYPOTHESIS - your best guess at the intended solution based purely on the evidence in the recon data\n"
+        "Respond with clearly labeled sections 1-6.\n"
+    )
 
-    path = Path(target)
-    ext = path.suffix.lower()
-    ext_map = {
-        ".pcap": "forensics",
-        ".pcapng": "forensics",
-        ".png": "forensics",
-        ".jpg": "forensics",
-        ".jpeg": "forensics",
-        ".bmp": "forensics",
-        ".gif": "forensics",
-        ".wav": "forensics",
-        ".mp3": "forensics",
-        ".zip": "forensics",
-        ".gz": "forensics",
-        ".tgz": "forensics",
-        ".xz": "forensics",
-        ".7z": "forensics",
-        ".rar": "forensics",
-        ".pem": "crypto",
-        ".key": "crypto",
-        ".enc": "crypto",
-        ".der": "crypto",
-        ".crt": "crypto",
-        ".so": "pwn",
-        ".bin": "pwn",
-        ".elf": "pwn",
-        ".exe": "pwn",
-    }
-    if ext in ext_map:
-        return ext_map[ext]
-
-    desc = (magic_desc or "").lower()
-    if any(k in desc for k in ["elf", "executable", "pe32"]):
-        return "pwn"
-    if any(k in desc for k in ["pcap", "capture", "network"]):
-        return "forensics"
-    if any(k in desc for k in ["png", "jpeg", "image", "bitmap"]):
-        return "forensics"
-    if any(k in desc for k in ["certificate", "rsa", "private key", "public key"]):
-        return "crypto"
-    return "misc"
-
-
-def tool_available(command: str) -> bool:
-    return shutil.which(command) is not None
-
-
+    prompt = instruction + "\n" + "\n\n".join(sections)
+    # Keep under ~3000 tokens (~12000 chars)
+    return prompt[:12000]
 def run_command(cmd: Sequence[str] | str, timeout: int = COMMAND_TIMEOUT, cwd: Optional[str] = None) -> Dict[str, str]:
     # Determine tool availability for shell pipelines by checking first token
     if isinstance(cmd, str):
@@ -164,6 +176,47 @@ def clean_json(text: str) -> str:
     cleaned = cleaned.replace("```", "")
     match = re.search(r"\{.*\}", cleaned, re.DOTALL)
     return match.group(0) if match else cleaned
+
+
+def truncate_lines(text: str, max_lines: int = 100) -> str:
+    lines = text.splitlines()
+    if len(lines) <= max_lines:
+        return text
+    return "\n".join([*lines[:max_lines], "...<truncated>..."])
+
+
+def extract_symbols(outputs: Dict[str, Dict[str, str]]) -> List[str]:
+    symbols: List[str] = []
+    nm_out = outputs.get("nm", {}).get("stdout", "")
+    rabin_out = outputs.get("rabin2_symbols", {}).get("stdout", "")
+    for text in (nm_out, rabin_out):
+        for line in text.splitlines():
+            parts = line.strip().split()
+            if len(parts) >= 1:
+                candidate = parts[-1]
+                if candidate and candidate not in symbols:
+                    symbols.append(candidate)
+    return symbols
+
+
+def top_lines(text: str, max_lines: int = 10) -> str:
+    lines = [ln for ln in text.splitlines() if ln.strip()]
+    return "\n".join(lines[:max_lines])
+
+
+def suspicious_strings(outputs: Dict[str, Dict[str, str]]) -> List[str]:
+    hits: List[str] = []
+    keywords = ["flag", "ctf", "secret", "password", "key"]
+    for name in ["strings_grep", "strings_full"]:
+        text = outputs.get(name, {}).get("stdout", "")
+        for line in text.splitlines():
+            lower = line.lower()
+            if any(k in lower for k in keywords):
+                if line.strip() and line.strip() not in hits:
+                    hits.append(line.strip())
+            if len(hits) >= 10:
+                return hits
+    return hits
 
 
 def call_llm(prompt: str) -> Tuple[Optional[str], str]:
@@ -412,25 +465,73 @@ def build_llm_prompt_rich(
     observations: List[str],
     outputs: Dict[str, Dict[str, str]],
 ) -> str:
-    """Add more context (type, magic, protections) to the LLM prompt."""
-    parts = [
+    header = [
         f"Category: {category}",
         f"Target: {target}",
-        f"Target type: {'URL' if is_url(target) else 'file'}",
+        f"Type: {'URL' if is_url(target) else 'file'}",
     ]
     if magic_desc:
-        parts.append(f"Magic: {magic_desc}")
+        header.append(f"Magic: {magic_desc}")
     if sha and sha != "N/A":
-        parts.append(f"SHA256: {sha}")
-    checksec_out = outputs.get("checksec", {}).get("stdout", "").splitlines()
-    if checksec_out:
-        parts.append(f"checksec: {checksec_out[0][:160]}")
-    parts.append("Observations: " + "; ".join(observations[:5]))
-    joined = " | ".join(parts)
-    return (
-        "I am solving a CTF challenge. Here is my recon context: "
-        f"{joined}. Suggest the top attack vectors to try first."
+        header.append(f"SHA256: {sha}")
+    header.append("Observations: " + "; ".join(observations[:5]))
+
+    sections: List[str] = []
+    sections.append(" | ".join(header))
+
+    checksec_out = outputs.get("checksec", {})
+    if checksec_out.get("status") == "ok" and checksec_out.get("stdout"):
+        sections.append("[checksec]\n" + top_lines(checksec_out["stdout"], 25))
+
+    symbols = extract_symbols(outputs)
+    if symbols:
+        sections.append("[symbols]\n" + ", ".join(symbols[:80]))
+
+    suspicious_funcs = [s for s in symbols if any(tag in s.lower() for tag in ["win", "flag", "shell", "backdoor"])]
+    if suspicious_funcs:
+        sections.append("[suspicious_symbols]\n" + ", ".join(suspicious_funcs[:40]))
+
+    if magic_desc:
+        sections.append(f"[file_type]\n{magic_desc}")
+    xxd_out = outputs.get("xxd_head", {})
+    if xxd_out.get("status") == "ok" and xxd_out.get("stdout"):
+        sections.append("[magic_bytes]\n" + top_lines(xxd_out["stdout"], 6))
+
+    exif_out = outputs.get("exiftool", {})
+    if exif_out.get("status") == "ok" and exif_out.get("stdout"):
+        sections.append("[exiftool]\n" + top_lines(exif_out["stdout"], 20))
+
+    binwalk_out = outputs.get("binwalk", {})
+    if binwalk_out.get("status") == "ok" and binwalk_out.get("stdout"):
+        sections.append("[binwalk]\n" + top_lines(binwalk_out["stdout"], 20))
+
+    string_hits = suspicious_strings(outputs)
+    if string_hits:
+        sections.append("[strings]\n" + "\n".join(string_hits[:10]))
+
+    curl_head = outputs.get("curl_head", {})
+    curl_headers = outputs.get("curl_headers", {})
+    curl_grep = outputs.get("curl_grep", {})
+    web_blocks: List[str] = []
+    for out in (curl_head, curl_headers):
+        if out.get("status") == "ok" and out.get("stdout"):
+            web_blocks.append(top_lines(out["stdout"], 15))
+    if curl_grep.get("status") == "ok" and curl_grep.get("stdout"):
+        web_blocks.append(top_lines(curl_grep["stdout"], 15))
+    if web_blocks:
+        sections.append("[web]\n" + "\n---\n".join(web_blocks))
+
+    enc_out = outputs.get("python_detect_encoding", {})
+    if enc_out.get("status") == "ok" and enc_out.get("stdout"):
+        sections.append("[encoding]\n" + top_lines(enc_out["stdout"], 20))
+
+    prompt = (
+        "You are assisting a CTF competitor. Based on the recon snippets below, "
+        "suggest the top attack vectors or next steps."
+        "\n\n" + "\n\n".join(sections)
     )
+    # Keep prompt concise (approx token <=1500 -> ~6000 chars)
+    return prompt[:6000]
 
 
 def main() -> None:
@@ -508,8 +609,8 @@ def main() -> None:
     md_parts.append("\n## Suggested Next Steps")
     for step in suggested_next_steps(category)[:5]:
         md_parts.append(f"- {step}")
-    prompt = build_llm_prompt_rich(category, target, magic_desc, sha, observations, outputs)
-    md_parts.append("\n## LLM Prompt")
+    prompt = build_llm_prompt_deep(category, target, magic_desc, sha, observations, outputs)
+    md_parts.append("\n## LLM Prompt (Deep)")
     md_parts.append(textwrap.dedent(f"""
     ```
     {prompt}
@@ -517,13 +618,11 @@ def main() -> None:
     """))
 
     llm_text, llm_status = call_llm(prompt)
-    md_parts.append("\n## LLM Suggestions")
+    md_parts.append("\n## Deep Analysis")
     if llm_text:
         md_parts.append("Status: ok\n")
         md_parts.append(textwrap.dedent(f"""
-        ```
         {llm_text.strip()}
-        ```
         """))
     else:
         reason = {
