@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """CTF recon helper.
 
-Runs lightweight recon commands against a challenge file or URL and produces
-structured Markdown/JSON reports suitable for handoff to a stronger LLM.
-"""
+Runs lightweight recon commands against a challenge file, URL, or host:port
+and produces structured Markdown/JSON reports suitable for handoff to a
+stronger LLM."""
 
 from __future__ import annotations
 
@@ -17,94 +17,98 @@ import shutil
 import subprocess
 import sys
 import textwrap
-def build_llm_prompt_deep(
-    category: str,
-    target: str,
-    magic_desc: Optional[str],
-    sha: str,
-    observations: List[str],
-    outputs: Dict[str, Dict[str, str]],
-) -> str:
-    """Build rich prompt with all non-empty recon outputs; limit length."""
+from datetime import datetime
+from pathlib import Path
+from typing import Dict, List, Optional, Sequence, Tuple
+from urllib.parse import urlparse
 
-    def section_if_ok(name: str, key: str, max_lines: int = 100) -> Optional[str]:
-        res = outputs.get(key, {})
-        if res.get("status") != "ok":
-            return None
-        body = res.get("stdout", "").strip()
-        if not body:
-            return None
-        return f"[{name}]\n{truncate_lines(body, max_lines)}"
+# Default timeouts (seconds)
+COMMAND_TIMEOUT = 10
+EXEC_TIMEOUT = 5  # for ltrace/strace
 
-    sections: List[str] = []
-    header = [
-        f"Category: {category}",
-        f"Target: {target}",
-        f"Type: {'URL' if is_url(target) else 'file'}",
-    ]
-    if magic_desc:
-        header.append(f"Magic: {magic_desc}")
-    if sha and sha != "N/A":
-        header.append(f"SHA256: {sha}")
-    if observations:
-        header.append("Observations: " + "; ".join(observations[:5]))
-    sections.append(" | ".join(header))
 
-    for name, key in [
-        ("file", "file"),
-        ("checksec", "checksec"),
-        ("readelf", "readelf"),
-        ("objdump", "objdump"),
-        ("nm", "nm"),
-        ("rabin2_symbols", "rabin2_symbols"),
-        ("strings", "strings_full"),
-        ("strings_grep", "strings_grep"),
-        ("binwalk", "binwalk"),
-        ("exiftool", "exiftool"),
-        ("strace", "strace"),
-        ("ltrace", "ltrace"),
-        ("readelf", "readelf"),
-        ("rabin2_info", "rabin2_info"),
-    ]:
-        sec = section_if_ok(name, key)
-        if sec:
-            sections.append(sec)
+def is_url(target: str) -> bool:
+    parsed = urlparse(target)
+    return bool(parsed.scheme and parsed.netloc)
 
-    # HTTP headers and page content
-    web_parts: List[str] = []
-    for key in ["curl_head", "curl_headers", "curl_grep", "whatweb", "robots", "git_head"]:
-        res = outputs.get(key, {})
-        if res.get("status") == "ok" and res.get("stdout"):
-            web_parts.append(truncate_lines(res["stdout"], 100))
-    if web_parts:
-        sections.append("[web]\n" + "\n---\n".join(web_parts))
 
-    # PCAP summaries
-    for key in ["tshark_summary", "tshark_http_uris", "tshark_follow"]:
-        res = outputs.get(key, {})
-        if res.get("status") == "ok" and res.get("stdout"):
-            sections.append(f"[{key}]\n" + truncate_lines(res["stdout"], 100))
+def parse_host_port(target: str) -> Optional[Tuple[str, int]]:
+    match = re.match(r"^([a-zA-Z0-9_.-]+):(\d{1,5})$", target)
+    if not match:
+        return None
+    host, port_str = match.groups()
+    try:
+        port = int(port_str)
+        if 1 <= port <= 65535:
+            return host, port
+    except ValueError:
+        return None
+    return None
 
-    # Encoding detection
-    enc = outputs.get("python_detect_encoding", {})
-    if enc.get("status") == "ok" and enc.get("stdout"):
-        sections.append("[encoding]\n" + truncate_lines(enc["stdout"], 100))
 
-    # Build final prompt with analyst instructions
-    instruction = (
-        "You are a CTF analyst. Analyze this recon data and extract:\n"
-        "1. VULNERABILITY INDICATORS - any functions, strings, protections, or patterns that suggest a specific vulnerability class\n"
-        "2. KEY FINDINGS - the most important observations from the recon (e.g. dangerous functions present, missing protections, hidden functions, suspicious metadata, encoded data detected)\n"
-        "3. BINARY PROFILE - summarize the target in one paragraph (architecture, protections, purpose, notable symbols)\n"
-        "4. ATTACK SURFACE - list every possible input vector found (argv, stdin, network, files, env vars, format strings etc)\n"
-        "5. RECOMMENDED TOOL SEQUENCE - ordered list of next tools to run with exact commands and expected output\n"
-        "6. SOLVE HYPOTHESIS - your best guess at the intended solution based purely on the evidence in the recon data\n"
-        "Respond with clearly labeled sections 1-6.\n"
-    )
+def sha256sum(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(8192), b""):
+            h.update(chunk)
+    return h.hexdigest()
 
-    prompt = instruction + "\n" + "\n\n".join(sections)
-    # Keep under ~3000 tokens (~12000 chars)
-    return prompt[:12000]
+
+def detect_category(target: str, provided: Optional[str], magic_desc: Optional[str], net_mode: bool) -> str:
+    if provided:
+        return provided.lower()
+    if net_mode:
+        return "pwn"
+    if is_url(target):
+        return "web"
+
+    path = Path(target)
+    ext = path.suffix.lower()
+    ext_map = {
+        ".pcap": "forensics",
+        ".pcapng": "forensics",
+        ".png": "forensics",
+        ".jpg": "forensics",
+        ".jpeg": "forensics",
+        ".bmp": "forensics",
+        ".gif": "forensics",
+        ".wav": "forensics",
+        ".mp3": "forensics",
+        ".zip": "forensics",
+        ".gz": "forensics",
+        ".tgz": "forensics",
+        ".xz": "forensics",
+        ".7z": "forensics",
+        ".rar": "forensics",
+        ".pem": "crypto",
+        ".key": "crypto",
+        ".enc": "crypto",
+        ".der": "crypto",
+        ".crt": "crypto",
+        ".so": "pwn",
+        ".bin": "pwn",
+        ".elf": "pwn",
+        ".exe": "pwn",
+    }
+    if ext in ext_map:
+        return ext_map[ext]
+
+    desc = (magic_desc or "").lower()
+    if any(k in desc for k in ["elf", "executable", "pe32"]):
+        return "pwn"
+    if any(k in desc for k in ["pcap", "capture", "network"]):
+        return "forensics"
+    if any(k in desc for k in ["png", "jpeg", "image", "bitmap"]):
+        return "forensics"
+    if any(k in desc for k in ["certificate", "rsa", "private key", "public key"]):
+        return "crypto"
+    return "misc"
+
+
+def tool_available(command: str) -> bool:
+    return shutil.which(command) is not None
+
+
 def run_command(cmd: Sequence[str] | str, timeout: int = COMMAND_TIMEOUT, cwd: Optional[str] = None) -> Dict[str, str]:
     # Determine tool availability for shell pipelines by checking first token
     if isinstance(cmd, str):
@@ -158,6 +162,13 @@ def truncate_output(text: str, max_lines: int = 100, head: int = 50, tail: int =
     return "\n".join([*lines[:head], "...<truncated>...", *lines[-tail:]])
 
 
+def truncate_lines(text: str, max_lines: int = 100) -> str:
+    lines = text.splitlines()
+    if len(lines) <= max_lines:
+        return text
+    return "\n".join([*lines[:max_lines], "...<truncated>..."])
+
+
 def flag_like_strings(outputs: Dict[str, Dict[str, str]]) -> List[str]:
     pattern = re.compile(r"(flag|ctf)\{[^}]{4,120}\}", re.IGNORECASE)
     found: List[str] = []
@@ -178,13 +189,6 @@ def clean_json(text: str) -> str:
     return match.group(0) if match else cleaned
 
 
-def truncate_lines(text: str, max_lines: int = 100) -> str:
-    lines = text.splitlines()
-    if len(lines) <= max_lines:
-        return text
-    return "\n".join([*lines[:max_lines], "...<truncated>..."])
-
-
 def extract_symbols(outputs: Dict[str, Dict[str, str]]) -> List[str]:
     symbols: List[str] = []
     nm_out = outputs.get("nm", {}).get("stdout", "")
@@ -192,7 +196,7 @@ def extract_symbols(outputs: Dict[str, Dict[str, str]]) -> List[str]:
     for text in (nm_out, rabin_out):
         for line in text.splitlines():
             parts = line.strip().split()
-            if len(parts) >= 1:
+            if parts:
                 candidate = parts[-1]
                 if candidate and candidate not in symbols:
                     symbols.append(candidate)
@@ -276,8 +280,18 @@ def select_commands_with_llm(category: str, target: str, cmds: List[Tuple[str, S
         return cmds
 
 
-def gather_commands(category: str, target: str, is_url_target: bool) -> List[Tuple[str, Sequence[str] | str, int]]:
+def gather_commands(category: str, target: str, is_url_target: bool, net_mode: bool, host_port: Optional[Tuple[str, int]]) -> List[Tuple[str, Sequence[str] | str, int]]:
     cmds: List[Tuple[str, Sequence[str] | str, int]] = []
+
+    if net_mode and host_port:
+        host, port = host_port
+        cmds.extend(
+            [
+                ("nc_banner", f"printf '' | nc -v -w 3 {shlex.quote(host)} {port}", COMMAND_TIMEOUT),
+                ("nc_head", f"printf '' | nc -v -w 3 {shlex.quote(host)} {port} | head -40", COMMAND_TIMEOUT),
+            ]
+        )
+        return cmds
 
     always_file_cmds: List[Tuple[str, str]] = [
         ("file", f"file {shlex.quote(target)}"),
@@ -340,16 +354,11 @@ def gather_commands(category: str, target: str, is_url_target: bool) -> List[Tup
             ]
         )
     if category in {"forensics", "misc", "pwn", "rev", "reversing"}:
-        # PCAP/Network heuristics if applicable
         if target.lower().endswith((".pcap", ".pcapng")):
             cmds.extend(
                 [
                     ("tshark_summary", ["tshark", "-r", target, "-q", "-z", "io,phs"], COMMAND_TIMEOUT),
-                    (
-                        "tshark_http_uris",
-                        ["tshark", "-r", target, "-Y", "http", "-T", "fields", "-e", "http.request.uri"],
-                        COMMAND_TIMEOUT,
-                    ),
+                    ("tshark_http_uris", ["tshark", "-r", target, "-Y", "http", "-T", "fields", "-e", "http.request.uri"], COMMAND_TIMEOUT),
                     ("tshark_follow", ["tshark", "-r", target, "-z", "follow,tcp,ascii,0"], COMMAND_TIMEOUT),
                 ]
             )
@@ -376,22 +385,17 @@ def guess_magic(target: str) -> Optional[str]:
     return None
 
 
-def build_observations(
-    target: str,
-    magic_desc: Optional[str],
-    outputs: Dict[str, Dict[str, str]],
-    flag_hits: List[str],
-) -> List[str]:
+def build_observations(target: str, magic_desc: Optional[str], outputs: Dict[str, Dict[str, str]], flag_hits: List[str]) -> List[str]:
     obs: List[str] = []
     if flag_hits:
         obs.append(f"Flag-like strings: {', '.join(flag_hits[:5])}")
-    if magic_desc and not is_url(target):
+    if magic_desc and Path(target).exists():
         ext = Path(target).suffix.lower()
         if ext and magic_desc and ext.strip('.') not in magic_desc.lower():
             obs.append(f"File type mismatch? extension '{ext}' vs magic '{magic_desc}'")
     interesting = []
     keywords = ["flag", "password", "secret", "key", "todo", "comment"]
-    for tool, res in outputs.items():
+    for _tool, res in outputs.items():
         text = res.get("stdout", "")
         for line in text.splitlines():
             if any(k in line.lower() for k in keywords):
@@ -449,22 +453,19 @@ def suggested_next_steps(category: str) -> List[str]:
     ]
 
 
-def build_llm_prompt(summary: List[str]) -> str:
-    joined = " ".join(summary)[:800]
-    return (
-        "I am solving a CTF challenge. Here is my recon data: "
-        f"{joined}. What attack vectors should I try first?"
-    )
+def build_llm_prompt_deep(category: str, target: str, magic_desc: Optional[str], sha: str, observations: List[str], outputs: Dict[str, Dict[str, str]]) -> str:
+    """Build rich prompt with all non-empty recon outputs; limit length."""
 
+    def section_if_ok(name: str, key: str, max_lines: int = 100) -> Optional[str]:
+        res = outputs.get(key, {})
+        if res.get("status") != "ok":
+            return None
+        body = res.get("stdout", "").strip()
+        if not body:
+            return None
+        return f"[{name}]\n{truncate_lines(body, max_lines)}"
 
-def build_llm_prompt_rich(
-    category: str,
-    target: str,
-    magic_desc: Optional[str],
-    sha: str,
-    observations: List[str],
-    outputs: Dict[str, Dict[str, str]],
-) -> str:
+    sections: List[str] = []
     header = [
         f"Category: {category}",
         f"Target: {target}",
@@ -474,83 +475,81 @@ def build_llm_prompt_rich(
         header.append(f"Magic: {magic_desc}")
     if sha and sha != "N/A":
         header.append(f"SHA256: {sha}")
-    header.append("Observations: " + "; ".join(observations[:5]))
-
-    sections: List[str] = []
+    if observations:
+        header.append("Observations: " + "; ".join(observations[:5]))
     sections.append(" | ".join(header))
 
-    checksec_out = outputs.get("checksec", {})
-    if checksec_out.get("status") == "ok" and checksec_out.get("stdout"):
-        sections.append("[checksec]\n" + top_lines(checksec_out["stdout"], 25))
+    for name, key in [
+        ("file", "file"),
+        ("checksec", "checksec"),
+        ("readelf", "readelf"),
+        ("objdump", "objdump"),
+        ("nm", "nm"),
+        ("rabin2_symbols", "rabin2_symbols"),
+        ("strings", "strings_full"),
+        ("strings_grep", "strings_grep"),
+        ("binwalk", "binwalk"),
+        ("exiftool", "exiftool"),
+        ("strace", "strace"),
+        ("ltrace", "ltrace"),
+        ("rabin2_info", "rabin2_info"),
+    ]:
+        sec = section_if_ok(name, key)
+        if sec:
+            sections.append(sec)
 
-    symbols = extract_symbols(outputs)
-    if symbols:
-        sections.append("[symbols]\n" + ", ".join(symbols[:80]))
+    web_parts: List[str] = []
+    for key in ["curl_head", "curl_headers", "curl_grep", "whatweb", "robots", "git_head"]:
+        res = outputs.get(key, {})
+        if res.get("status") == "ok" and res.get("stdout"):
+            web_parts.append(truncate_lines(res["stdout"], 100))
+    if web_parts:
+        sections.append("[web]\n" + "\n---\n".join(web_parts))
 
-    suspicious_funcs = [s for s in symbols if any(tag in s.lower() for tag in ["win", "flag", "shell", "backdoor"])]
-    if suspicious_funcs:
-        sections.append("[suspicious_symbols]\n" + ", ".join(suspicious_funcs[:40]))
+    for key in ["tshark_summary", "tshark_http_uris", "tshark_follow"]:
+        res = outputs.get(key, {})
+        if res.get("status") == "ok" and res.get("stdout"):
+            sections.append(f"[{key}]\n" + truncate_lines(res["stdout"], 100))
 
-    if magic_desc:
-        sections.append(f"[file_type]\n{magic_desc}")
-    xxd_out = outputs.get("xxd_head", {})
-    if xxd_out.get("status") == "ok" and xxd_out.get("stdout"):
-        sections.append("[magic_bytes]\n" + top_lines(xxd_out["stdout"], 6))
+    enc = outputs.get("python_detect_encoding", {})
+    if enc.get("status") == "ok" and enc.get("stdout"):
+        sections.append("[encoding]\n" + truncate_lines(enc["stdout"], 100))
 
-    exif_out = outputs.get("exiftool", {})
-    if exif_out.get("status") == "ok" and exif_out.get("stdout"):
-        sections.append("[exiftool]\n" + top_lines(exif_out["stdout"], 20))
-
-    binwalk_out = outputs.get("binwalk", {})
-    if binwalk_out.get("status") == "ok" and binwalk_out.get("stdout"):
-        sections.append("[binwalk]\n" + top_lines(binwalk_out["stdout"], 20))
-
-    string_hits = suspicious_strings(outputs)
-    if string_hits:
-        sections.append("[strings]\n" + "\n".join(string_hits[:10]))
-
-    curl_head = outputs.get("curl_head", {})
-    curl_headers = outputs.get("curl_headers", {})
-    curl_grep = outputs.get("curl_grep", {})
-    web_blocks: List[str] = []
-    for out in (curl_head, curl_headers):
-        if out.get("status") == "ok" and out.get("stdout"):
-            web_blocks.append(top_lines(out["stdout"], 15))
-    if curl_grep.get("status") == "ok" and curl_grep.get("stdout"):
-        web_blocks.append(top_lines(curl_grep["stdout"], 15))
-    if web_blocks:
-        sections.append("[web]\n" + "\n---\n".join(web_blocks))
-
-    enc_out = outputs.get("python_detect_encoding", {})
-    if enc_out.get("status") == "ok" and enc_out.get("stdout"):
-        sections.append("[encoding]\n" + top_lines(enc_out["stdout"], 20))
-
-    prompt = (
-        "You are assisting a CTF competitor. Based on the recon snippets below, "
-        "suggest the top attack vectors or next steps."
-        "\n\n" + "\n\n".join(sections)
+    instruction = (
+        "You are a CTF analyst. Analyze this recon data and extract:\n"
+        "1. VULNERABILITY INDICATORS - any functions, strings, protections, or patterns that suggest a specific vulnerability class\n"
+        "2. KEY FINDINGS - the most important observations from the recon (e.g. dangerous functions present, missing protections, hidden functions, suspicious metadata, encoded data detected)\n"
+        "3. BINARY PROFILE - summarize the target in one paragraph (architecture, protections, purpose, notable symbols)\n"
+        "4. ATTACK SURFACE - list every possible input vector found (argv, stdin, network, files, env vars, format strings etc)\n"
+        "5. RECOMMENDED TOOL SEQUENCE - ordered list of next tools to run with exact commands and expected output\n"
+        "6. SOLVE HYPOTHESIS - your best guess at the intended solution based purely on the evidence in the recon data\n"
+        "Respond with clearly labeled sections 1-6.\n"
     )
-    # Keep prompt concise (approx token <=1500 -> ~6000 chars)
-    return prompt[:6000]
+
+    prompt = instruction + "\n" + "\n\n".join(sections)
+    return prompt[:12000]
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="CTF recon pipeline")
-    parser.add_argument("target", help="File path or URL")
+    parser.add_argument("target", help="File path, URL, or host:port")
     parser.add_argument("--category", choices=["crypto", "pwn", "web", "forensics", "rev", "misc"], help="Category hint")
     parser.add_argument("--json", dest="json_out", action="store_true", help="Also write JSON report")
     args = parser.parse_args()
 
     target = args.target
     url_mode = is_url(target)
-    if not url_mode and not Path(target).is_file():
+    host_port = None if url_mode else parse_host_port(target)
+    net_mode = host_port is not None
+
+    if not url_mode and not net_mode and not Path(target).is_file():
         print(f"[!] Target not found: {target}")
         sys.exit(1)
 
-    magic_desc = guess_magic(target)
-    category = detect_category(target, args.category, magic_desc)
+    magic_desc = None if net_mode or url_mode else guess_magic(target)
+    category = detect_category(target, args.category, magic_desc, net_mode)
 
-    cmds = gather_commands(category, target, url_mode)
+    cmds = gather_commands(category, target, url_mode, net_mode, host_port)
     cmds = select_commands_with_llm(category, target, cmds)
 
     print(f"[*] Target: {target}")
@@ -567,10 +566,10 @@ def main() -> None:
     flag_hits = flag_like_strings(outputs)
     observations = build_observations(target, magic_desc, outputs, flag_hits)
 
-    target_name = target if url_mode else Path(target).name
+    target_name = target if url_mode or net_mode else Path(target).name
     ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
     sha = "N/A"
-    if not url_mode:
+    if not url_mode and not net_mode:
         try:
             sha = sha256sum(Path(target))
         except Exception:
@@ -598,7 +597,7 @@ def main() -> None:
     md_parts.append(f"# CTF Recon Report — {target_name}")
     md_parts.append(f"**Date:** {ts}")
     md_parts.append(f"**Category:** {category}")
-    md_parts.append(f"**File:** {target}")
+    md_parts.append(f"**Target:** {target}")
     md_parts.append(f"**Hash:** {sha}")
     md_parts.append("\n## Quick Observations")
     for obs in observations:
@@ -609,6 +608,7 @@ def main() -> None:
     md_parts.append("\n## Suggested Next Steps")
     for step in suggested_next_steps(category)[:5]:
         md_parts.append(f"- {step}")
+
     prompt = build_llm_prompt_deep(category, target, magic_desc, sha, observations, outputs)
     md_parts.append("\n## LLM Prompt (Deep)")
     md_parts.append(textwrap.dedent(f"""
