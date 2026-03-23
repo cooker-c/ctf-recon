@@ -166,15 +166,15 @@ def clean_json(text: str) -> str:
     return match.group(0) if match else cleaned
 
 
-def call_llm(prompt: str) -> Optional[str]:
-    """Call NVIDIA NIM backend; return raw text or None on any failure."""
+def call_llm(prompt: str) -> Tuple[Optional[str], str]:
+    """Call NVIDIA NIM backend; return (text, status) where status notes failures."""
     api_key = os.getenv("NVIDIA_API_KEY")
     if not api_key:
-        return None
+        return None, "missing_api_key"
     try:
         from openai import OpenAI  # type: ignore
     except Exception:
-        return None
+        return None, "missing_openai_sdk"
 
     try:
         client = OpenAI(base_url="https://integrate.api.nvidia.com/v1", api_key=api_key)
@@ -191,9 +191,9 @@ def call_llm(prompt: str) -> Optional[str]:
             delta = chunk.choices[0].delta.content
             if delta:
                 chunks.append(delta)
-        return "".join(chunks)
+        return "".join(chunks), "ok"
     except Exception:
-        return None
+        return None, "error"
 
 
 def select_commands_with_llm(category: str, target: str, cmds: List[Tuple[str, Sequence[str] | str, int]]) -> List[Tuple[str, Sequence[str] | str, int]]:
@@ -209,7 +209,7 @@ def select_commands_with_llm(category: str, target: str, cmds: List[Tuple[str, S
         rendered = cmd if isinstance(cmd, str) else " ".join(cmd)
         prompt_lines.append(f"- {name}: {rendered}")
     prompt_lines.append("Example JSON: {\"commands\": [\"file\", \"strings_grep\"]}")
-    raw = call_llm("\n".join(prompt_lines))
+    raw, _status = call_llm("\n".join(prompt_lines))
     if not raw:
         return cmds
     try:
@@ -404,6 +404,35 @@ def build_llm_prompt(summary: List[str]) -> str:
     )
 
 
+def build_llm_prompt_rich(
+    category: str,
+    target: str,
+    magic_desc: Optional[str],
+    sha: str,
+    observations: List[str],
+    outputs: Dict[str, Dict[str, str]],
+) -> str:
+    """Add more context (type, magic, protections) to the LLM prompt."""
+    parts = [
+        f"Category: {category}",
+        f"Target: {target}",
+        f"Target type: {'URL' if is_url(target) else 'file'}",
+    ]
+    if magic_desc:
+        parts.append(f"Magic: {magic_desc}")
+    if sha and sha != "N/A":
+        parts.append(f"SHA256: {sha}")
+    checksec_out = outputs.get("checksec", {}).get("stdout", "").splitlines()
+    if checksec_out:
+        parts.append(f"checksec: {checksec_out[0][:160]}")
+    parts.append("Observations: " + "; ".join(observations[:5]))
+    joined = " | ".join(parts)
+    return (
+        "I am solving a CTF challenge. Here is my recon context: "
+        f"{joined}. Suggest the top attack vectors to try first."
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="CTF recon pipeline")
     parser.add_argument("target", help="File path or URL")
@@ -479,13 +508,29 @@ def main() -> None:
     md_parts.append("\n## Suggested Next Steps")
     for step in suggested_next_steps(category)[:5]:
         md_parts.append(f"- {step}")
-    prompt = build_llm_prompt(observations)
+    prompt = build_llm_prompt_rich(category, target, magic_desc, sha, observations, outputs)
     md_parts.append("\n## LLM Prompt")
     md_parts.append(textwrap.dedent(f"""
     ```
     {prompt}
     ```
     """))
+
+    llm_text, llm_status = call_llm(prompt)
+    md_parts.append("\n## LLM Suggestions")
+    if llm_text:
+        md_parts.append("Status: ok\n")
+        md_parts.append(textwrap.dedent(f"""
+        ```
+        {llm_text.strip()}
+        ```
+        """))
+    else:
+        reason = {
+            "missing_api_key": "NVIDIA_API_KEY missing",
+            "missing_openai_sdk": "openai package not installed",
+        }.get(llm_status, "LLM call failed")
+        md_parts.append(f"Status: failed ({reason})")
 
     report_path.write_text("\n".join(md_parts), encoding="utf-8")
     print(f"[+] Markdown report written to {report_path}")
@@ -501,6 +546,8 @@ def main() -> None:
             "flag_like": flag_hits,
             "magic": magic_desc,
             "tools": outputs,
+            "llm_status": llm_status,
+            "llm_text": llm_text or "",
         }
         json_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         print(f"[+] JSON report written to {json_path}")
