@@ -668,7 +668,7 @@ def process_target(target: str, args: argparse.Namespace, challenge_title: Optio
         print(f"[+] JSON report written to {json_path}")
 
 
-if __name__ == "__main__":
+def main():
     parser = argparse.ArgumentParser(description="CTF recon pipeline")
     parser.add_argument("targets", nargs="+", help="File paths, URLs, or host:port targets")
     parser.add_argument("--title", help="Challenge title", dest="challenge_title")
@@ -679,3 +679,7 @@ if __name__ == "__main__":
 
     for tgt in args.targets:
         process_target(tgt, args, args.challenge_title, args.challenge_description)
+
+
+if __name__ == "__main__":
+    main()
