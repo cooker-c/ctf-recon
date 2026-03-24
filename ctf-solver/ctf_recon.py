@@ -312,12 +312,10 @@ def gather_commands(category: str, target: str, is_url_target: bool, net_mode: b
 
     if net_mode and host_port:
         host, port = host_port
-        cmds.extend(
-            [
-                ("nc_banner", f"printf '' | nc -v -w 3 {shlex.quote(host)} {port}", COMMAND_TIMEOUT),
-                ("nc_head", f"printf '' | nc -v -w 3 {shlex.quote(host)} {port} | head -40", COMMAND_TIMEOUT),
-            ]
-        )
+        cmds.extend([
+            ("nc_banner", f"nc -w 5 {shlex.quote(host)} {port}", COMMAND_TIMEOUT),
+            ("nc_empty", f"timeout 10 nc {shlex.quote(host)} {port} < /dev/null", COMMAND_TIMEOUT),
+        ])
         return cmds
 
     always_file_cmds: List[Tuple[str, str]] = [
@@ -328,13 +326,16 @@ def gather_commands(category: str, target: str, is_url_target: bool, net_mode: b
         ("exiftool", f"exiftool {shlex.quote(target)}"),
     ]
 
-    # If likely text and not huge, include source preview to actually read code
+    # If small script/text file, include full source with cat
     try:
-        size_ok = Path(target).stat().st_size <= 1_500_000
+        file_size = Path(target).stat().st_size
     except Exception:
-        size_ok = False
+        file_size = 0
     is_text_like = magic_desc is not None and "text" in magic_desc.lower()
-    if size_ok and is_text_like:
+    is_script = magic_desc is not None and ("python script" in magic_desc.lower() or target.endswith(".py"))
+    if file_size > 0 and file_size <= 5 * 1024 and (is_text_like or is_script):
+        always_file_cmds.insert(1, ("source_full", f"cat {shlex.quote(target)}"))
+    elif file_size > 0 and is_text_like:
         always_file_cmds.insert(1, ("source_head", f"sed -n '1,200p' {shlex.quote(target)}"))
 
     always_url_cmds: List[Tuple[str, str]] = [
@@ -528,24 +529,38 @@ def build_llm_prompt_deep(
         header.append("Observations: " + "; ".join(observations[:5]))
     sections.append(" | ".join(header))
 
-    for name, key in [
-        ("file", "file"),
-        ("checksec", "checksec"),
-        ("readelf", "readelf"),
-        ("objdump", "objdump"),
-        ("nm", "nm"),
-        ("rabin2_symbols", "rabin2_symbols"),
-        ("strings", "strings_full"),
-        ("strings_grep", "strings_grep"),
-        ("binwalk", "binwalk"),
-        ("exiftool", "exiftool"),
-        ("strace", "strace"),
-        ("ltrace", "ltrace"),
-        ("rabin2_info", "rabin2_info"),
-    ]:
-        sec = section_if_ok(name, key)
-        if sec:
-            sections.append(sec)
+    # Prefer full source if available
+    if "source_full" in outputs and outputs["source_full"].get("status") == "ok":
+        full = outputs["source_full"].get("stdout", "").strip()
+        if full:
+            sections.append("[full_source]\n" + full)
+    else:
+        for name, key in [
+            ("file", "file"),
+            ("checksec", "checksec"),
+            ("readelf", "readelf"),
+            ("objdump", "objdump"),
+            ("nm", "nm"),
+            ("rabin2_symbols", "rabin2_symbols"),
+            ("strings", "strings_full"),
+            ("strings_grep", "strings_grep"),
+            ("binwalk", "binwalk"),
+            ("exiftool", "exiftool"),
+            ("strace", "strace"),
+            ("ltrace", "ltrace"),
+            ("rabin2_info", "rabin2_info"),
+        ]:
+            sec = section_if_ok(name, key)
+            if sec:
+                sections.append(sec)
+    # Add network service output if present
+    net_outputs = []
+    for key in ["nc_banner", "nc_empty"]:
+        res = outputs.get(key, {})
+        if res.get("status") == "ok" and res.get("stdout"):
+            net_outputs.append(f"[{key}]\n" + truncate_lines(res["stdout"], 100))
+    if net_outputs:
+        sections.append("[Network Service Output]\n" + "\n---\n".join(net_outputs))
 
     web_parts: List[str] = []
     for key in ["curl_head", "curl_headers", "curl_grep", "whatweb", "robots", "git_head"]:
