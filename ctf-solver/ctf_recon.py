@@ -19,7 +19,7 @@ import sys
 import textwrap
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 from urllib.parse import urlparse
 
 # Default timeouts (seconds)
@@ -43,6 +43,25 @@ def parse_host_port(target: str) -> Optional[Tuple[str, int]]:
             return host, port
     except ValueError:
         return None
+    return None
+
+
+def sniff_python_category(path: Path) -> Optional[str]:
+    """Heuristic: detect crypto/web/pwn intent for Python sources."""
+    try:
+        data = path.read_text(errors="ignore")
+    except Exception:
+        return None
+    lower = data.lower()
+    crypto_keys = ["gmpy2", "pycryptodome", "crypto", "cryptography", "rsa", "ecdsa", "hashlib", "secp", "dh", "diffie"]
+    pwn_keys = ["pwntools", "pwn", "socket", "struct", "recv", "send", "exploit"]
+    web_keys = ["flask", "django", "fastapi", "requests", "http.server"]
+    if any(k in lower for k in crypto_keys):
+        return "crypto"
+    if any(k in lower for k in pwn_keys):
+        return "pwn"
+    if any(k in lower for k in web_keys):
+        return "web"
     return None
 
 
@@ -92,6 +111,13 @@ def detect_category(target: str, provided: Optional[str], magic_desc: Optional[s
     }
     if ext in ext_map:
         return ext_map[ext]
+
+    # Python scripts: peek imports to classify
+    if ext == ".py" or (magic_desc and "python script" in magic_desc.lower()):
+        hint = sniff_python_category(path)
+        if hint:
+            return hint
+        return "misc"
 
     desc = (magic_desc or "").lower()
     if any(k in desc for k in ["elf", "executable", "pe32"]):
@@ -281,7 +307,7 @@ def select_commands_with_llm(category: str, target: str, cmds: List[Tuple[str, S
         return cmds
 
 
-def gather_commands(category: str, target: str, is_url_target: bool, net_mode: bool, host_port: Optional[Tuple[str, int]]) -> List[Tuple[str, Sequence[str] | str, int]]:
+def gather_commands(category: str, target: str, is_url_target: bool, net_mode: bool, host_port: Optional[Tuple[str, int]], magic_desc: Optional[str]) -> List[Tuple[str, Sequence[str] | str, int]]:
     cmds: List[Tuple[str, Sequence[str] | str, int]] = []
 
     if net_mode and host_port:
@@ -301,6 +327,15 @@ def gather_commands(category: str, target: str, is_url_target: bool, net_mode: b
         ("sha256sum", f"sha256sum {shlex.quote(target)}"),
         ("exiftool", f"exiftool {shlex.quote(target)}"),
     ]
+
+    # If likely text and not huge, include source preview to actually read code
+    try:
+        size_ok = Path(target).stat().st_size <= 1_500_000
+    except Exception:
+        size_ok = False
+    is_text_like = magic_desc is not None and "text" in magic_desc.lower()
+    if size_ok and is_text_like:
+        always_file_cmds.insert(1, ("source_head", f"sed -n '1,200p' {shlex.quote(target)}"))
 
     always_url_cmds: List[Tuple[str, str]] = [
         ("curl_head", f"curl -I {shlex.quote(target)}"),
@@ -544,19 +579,19 @@ def build_llm_prompt_deep(
     return prompt[:12000]
 
 
-def process_target(target: str, args: argparse.Namespace, challenge_title: Optional[str], challenge_description: Optional[str]) -> None:
+def process_target(target: str, args: argparse.Namespace, challenge_title: Optional[str], challenge_description: Optional[str]) -> Dict[str, Any]:
     url_mode = is_url(target)
     host_port = None if url_mode else parse_host_port(target)
     net_mode = host_port is not None
 
     if not url_mode and not net_mode and not Path(target).is_file():
         print(f"[!] Target not found: {target}")
-        return
+        return {}
 
     magic_desc = None if net_mode or url_mode else guess_magic(target)
     category = detect_category(target, args.category, magic_desc, net_mode)
 
-    cmds = gather_commands(category, target, url_mode, net_mode, host_port)
+    cmds = gather_commands(category, target, url_mode, net_mode, host_port, magic_desc)
     cmds = select_commands_with_llm(category, target, cmds)
 
     print(f"[*] Target: {target}")
@@ -667,6 +702,95 @@ def process_target(target: str, args: argparse.Namespace, challenge_title: Optio
         json_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         print(f"[+] JSON report written to {json_path}")
 
+    return {
+        "target": target,
+        "target_name": target_name,
+        "category": category,
+        "magic": magic_desc,
+        "sha": sha,
+        "observations": observations,
+        "flag_hits": flag_hits,
+        "outputs": outputs,
+        "llm_status": llm_status,
+        "llm_text": llm_text or "",
+        "report_path": str(report_path),
+        "prompt": prompt,
+    }
+
+
+def run_combined_analysis(results: List[Dict[str, Any]], challenge_title: Optional[str], challenge_description: Optional[str]) -> None:
+    if not results:
+        return
+
+    def snippet(outputs: Dict[str, Dict[str, str]], key: str, max_lines: int = 40) -> Optional[str]:
+        res = outputs.get(key, {})
+        if res.get("status") == "ok" and res.get("stdout"):
+            return truncate_lines(res["stdout"], max_lines)
+        return None
+
+    sections: List[str] = []
+    header = ["Cross-target correlation for challenge"]
+    if challenge_title:
+        header.append(f"Title: {challenge_title}")
+    if challenge_description:
+        header.append(f"Description: {challenge_description[:400]}")
+    sections.append(" | ".join(header))
+
+    for item in results:
+        block: List[str] = []
+        block.append(f"Target: {item.get('target_name')} (category {item.get('category')})")
+        if item.get("magic"):
+            block.append(f"Magic: {item['magic']}")
+        if item.get("sha"):
+            block.append(f"SHA: {item['sha']}")
+        obs = item.get("observations", [])
+        if obs:
+            block.append("Observations: " + "; ".join(obs[:3]))
+
+        outputs = item.get("outputs", {})
+        for key in ["source_head", "strings_grep", "xxd_head"]:
+            sn = snippet(outputs, key)
+            if sn:
+                block.append(f"[{key}]\n{sn}")
+        combined = "\n".join(block)
+        sections.append(combined)
+
+    instruction = (
+        "You are a CTF analyst. You have multiple related files from the same challenge. "
+        "Identify relationships between them (e.g., generator/output pairs, shared parameters, encoding). "
+        "Propose a single unified solve path that uses the files together. "
+        "Highlight which file produces data consumed by another and how to recover the flag."
+    )
+    prompt = instruction + "\n\n" + "\n\n---\n\n".join(sections)
+    prompt = prompt[:12000]
+
+    llm_text, llm_status = call_llm(prompt)
+    report_name = "report_combined.md"
+    report_path = Path(report_name)
+
+    md_parts: List[str] = []
+    md_parts.append("# Combined Recon Report")
+    if challenge_title:
+        md_parts.append(f"**Title:** {challenge_title}")
+    if challenge_description:
+        md_parts.append(f"**Description:** {challenge_description}")
+    md_parts.append("\n## Summary of Inputs")
+    md_parts.extend(["- " + sec.replace("\n", " | ") for sec in sections[1:]])
+    md_parts.append("\n## Combined LLM Prompt")
+    md_parts.append("```\n" + prompt + "\n```")
+    md_parts.append("\n## Combined Analysis")
+    if llm_text:
+        md_parts.append("Status: ok\n\n" + llm_text.strip())
+    else:
+        reason = {
+            "missing_api_key": "NVIDIA_API_KEY missing",
+            "missing_openai_sdk": "openai package not installed",
+        }.get(llm_status, "LLM call failed")
+        md_parts.append(f"Status: failed ({reason})")
+
+    report_path.write_text("\n".join(md_parts), encoding="utf-8")
+    print(f"[+] Combined report written to {report_path}")
+
 
 def main():
     parser = argparse.ArgumentParser(description="CTF recon pipeline")
@@ -677,9 +801,14 @@ def main():
     parser.add_argument("--json", dest="json_out", action="store_true", help="Also write JSON report")
     args = parser.parse_args()
 
+    results: List[Dict[str, Any]] = []
     for tgt in args.targets:
-        process_target(tgt, args, args.challenge_title, args.challenge_description)
+        res = process_target(tgt, args, args.challenge_title, args.challenge_description)
+        if res:
+            results.append(res)
 
+    if len(results) > 1:
+        run_combined_analysis(results, args.challenge_title, args.challenge_description)
 
 if __name__ == "__main__":
     main()
