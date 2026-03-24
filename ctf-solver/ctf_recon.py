@@ -233,10 +233,11 @@ def call_llm(prompt: str) -> Tuple[Optional[str], str]:
     except Exception:
         return None, "missing_openai_sdk"
 
+    model = os.getenv("NVIDIA_MODEL", "meta/llama-3.3-70b-instruct")
     try:
         client = OpenAI(base_url="https://integrate.api.nvidia.com/v1", api_key=api_key)
         completion = client.chat.completions.create(
-            model="tiiuae/falcon3-7b-instruct",
+            model=model,
             messages=[{"role": "user", "content": prompt}],
             temperature=0.2,
             top_p=0.7,
