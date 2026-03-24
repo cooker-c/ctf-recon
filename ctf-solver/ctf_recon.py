@@ -566,6 +566,7 @@ def build_llm_prompt_deep(
 
     instruction = (
         "You are a CTF analyst. Analyze this recon data and extract:\n"
+        "NEVER guess or fabricate flag values. If you think you know the flag, say 'FLAG RECOVERY REQUIRES: <tool/method>' instead. Only report what is explicitly present in the recon data.\n"
         "1. VULNERABILITY INDICATORS - any functions, strings, protections, or patterns that suggest a specific vulnerability class\n"
         "2. KEY FINDINGS - the most important observations from the recon (e.g. dangerous functions present, missing protections, hidden functions, suspicious metadata, encoded data detected)\n"
         "3. BINARY PROFILE - summarize the target in one paragraph (architecture, protections, purpose, notable symbols)\n"
