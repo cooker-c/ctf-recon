@@ -454,7 +454,16 @@ def suggested_next_steps(category: str) -> List[str]:
     ]
 
 
-def build_llm_prompt_deep(category: str, target: str, magic_desc: Optional[str], sha: str, observations: List[str], outputs: Dict[str, Dict[str, str]]) -> str:
+def build_llm_prompt_deep(
+    category: str,
+    target: str,
+    magic_desc: Optional[str],
+    sha: str,
+    observations: List[str],
+    outputs: Dict[str, Dict[str, str]],
+    challenge_title: Optional[str] = None,
+    challenge_description: Optional[str] = None,
+) -> str:
     """Build rich prompt with all non-empty recon outputs; limit length."""
 
     def section_if_ok(name: str, key: str, max_lines: int = 100) -> Optional[str]:
@@ -472,6 +481,10 @@ def build_llm_prompt_deep(category: str, target: str, magic_desc: Optional[str],
         f"Target: {target}",
         f"Type: {'URL' if is_url(target) else 'file'}",
     ]
+    if challenge_title:
+        header.append(f"Challenge: {challenge_title}")
+    if challenge_description:
+        header.append(f"Description: {challenge_description[:400]}")
     if magic_desc:
         header.append(f"Magic: {magic_desc}")
     if sha and sha != "N/A":
@@ -531,21 +544,14 @@ def build_llm_prompt_deep(category: str, target: str, magic_desc: Optional[str],
     return prompt[:12000]
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description="CTF recon pipeline")
-    parser.add_argument("target", help="File path, URL, or host:port")
-    parser.add_argument("--category", choices=["crypto", "pwn", "web", "forensics", "rev", "misc"], help="Category hint")
-    parser.add_argument("--json", dest="json_out", action="store_true", help="Also write JSON report")
-    args = parser.parse_args()
-
-    target = args.target
+def process_target(target: str, args: argparse.Namespace, challenge_title: Optional[str], challenge_description: Optional[str]) -> None:
     url_mode = is_url(target)
     host_port = None if url_mode else parse_host_port(target)
     net_mode = host_port is not None
 
     if not url_mode and not net_mode and not Path(target).is_file():
         print(f"[!] Target not found: {target}")
-        sys.exit(1)
+        return
 
     magic_desc = None if net_mode or url_mode else guess_magic(target)
     category = detect_category(target, args.category, magic_desc, net_mode)
@@ -610,7 +616,16 @@ def main() -> None:
     for step in suggested_next_steps(category)[:5]:
         md_parts.append(f"- {step}")
 
-    prompt = build_llm_prompt_deep(category, target, magic_desc, sha, observations, outputs)
+    prompt = build_llm_prompt_deep(
+        category,
+        target,
+        magic_desc,
+        sha,
+        observations,
+        outputs,
+        challenge_title=challenge_title,
+        challenge_description=challenge_description,
+    )
     md_parts.append("\n## LLM Prompt (Deep)")
     md_parts.append(textwrap.dedent(f"""
     ```
@@ -654,4 +669,13 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description="CTF recon pipeline")
+    parser.add_argument("targets", nargs="+", help="File paths, URLs, or host:port targets")
+    parser.add_argument("--title", help="Challenge title", dest="challenge_title")
+    parser.add_argument("--description", help="Challenge description", dest="challenge_description")
+    parser.add_argument("--category", choices=["crypto", "pwn", "web", "forensics", "rev", "misc"], help="Category hint")
+    parser.add_argument("--json", dest="json_out", action="store_true", help="Also write JSON report")
+    args = parser.parse_args()
+
+    for tgt in args.targets:
+        process_target(tgt, args, args.challenge_title, args.challenge_description)
