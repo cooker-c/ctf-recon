@@ -18,13 +18,13 @@ It is designed for students, CTF teams, and security learners who want repeatabl
 
 ```text
 .
-|-- ctf-solver/                 # Python package and CLI source
+|-- ctf-recon/                  # Python package and CLI source
 |   |-- ctf_recon.py
 |   |-- pyproject.toml
 |   |-- README.md
 |   `-- tests/
 |-- .github/workflows/ci.yml    # lint, tests, security scan
-|-- CTF_Solver_Architecture.pdf
+|-- CTF_Recon_Architecture.pdf
 |-- CONTRIBUTING.md
 |-- LICENSE
 `-- SECURITY.md
@@ -35,7 +35,7 @@ It is designed for students, CTF teams, and security learners who want repeatabl
 From the repository root:
 
 ```bash
-cd ctf-solver
+cd ctf-recon
 python -m venv .venv
 source .venv/bin/activate       # Windows PowerShell: .venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
@@ -122,7 +122,7 @@ Keep `NVIDIA_API_KEY` and any challenge credentials out of source control. Gener
 ## Quality Checks
 
 ```bash
-cd ctf-solver
+cd ctf-recon
 python -m ruff check .
 python -m pytest -q
 python -m bandit -q -r ctf_recon.py

@@ -5,7 +5,7 @@ Thanks for helping improve CTF Recon.
 ## Development Setup
 
 ```bash
-cd ctf-solver
+cd ctf-recon
 python -m venv .venv
 python -m pip install --upgrade pip
 python -m pip install -e ".[dev]"

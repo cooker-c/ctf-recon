@@ -32,8 +32,8 @@ dev = ["pytest>=8.0", "mypy>=1.8", "ruff>=0.4.0", "bandit>=1.7.8"]
 ctf-recon = "ctf_recon:main"
 
 [project.urls]
-Homepage = "https://github.com/cooker-c/ctf-solver"
-Issues = "https://github.com/cooker-c/ctf-solver/issues"
+Homepage = "https://github.com/cooker-c/ctf-recon"
+Issues = "https://github.com/cooker-c/ctf-recon/issues"
 
 [tool.setuptools]
 package-dir = {"" = "."}
