@@ -14,12 +14,12 @@ import os
 import re
 import shlex
 import shutil
-import subprocess
-import sys
+import subprocess  # nosec B404
 import textwrap
+from collections.abc import Sequence
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any
 from urllib.parse import urlparse
 
 # Default timeouts (seconds)
@@ -32,7 +32,7 @@ def is_url(target: str) -> bool:
     return bool(parsed.scheme and parsed.netloc)
 
 
-def parse_host_port(target: str) -> Optional[Tuple[str, int]]:
+def parse_host_port(target: str) -> tuple[str, int] | None:
     match = re.match(r"^([a-zA-Z0-9_.-]+):(\d{1,5})$", target)
     if not match:
         return None
@@ -46,7 +46,7 @@ def parse_host_port(target: str) -> Optional[Tuple[str, int]]:
     return None
 
 
-def sniff_python_category(path: Path) -> Optional[str]:
+def sniff_python_category(path: Path) -> str | None:
     """Heuristic: detect crypto/web/pwn intent for Python sources."""
     try:
         data = path.read_text(errors="ignore")
@@ -73,7 +73,7 @@ def sha256sum(path: Path) -> str:
     return h.hexdigest()
 
 
-def detect_category(target: str, provided: Optional[str], magic_desc: Optional[str], net_mode: bool) -> str:
+def detect_category(target: str, provided: str | None, magic_desc: str | None, net_mode: bool) -> str:
     if provided:
         return provided.lower()
     if net_mode:
@@ -135,7 +135,7 @@ def tool_available(command: str) -> bool:
     return shutil.which(command) is not None
 
 
-def run_command(cmd: Sequence[str] | str, timeout: int = COMMAND_TIMEOUT, cwd: Optional[str] = None) -> Dict[str, str]:
+def run_command(cmd: Sequence[str] | str, timeout: int = COMMAND_TIMEOUT, cwd: str | None = None) -> dict[str, str]:
     # Determine tool availability for shell pipelines by checking first token
     if isinstance(cmd, str):
         first = cmd.split()[0]
@@ -144,7 +144,7 @@ def run_command(cmd: Sequence[str] | str, timeout: int = COMMAND_TIMEOUT, cwd: O
         if not tool_available(first):
             return {"status": "tool not found", "stdout": "", "stderr": ""}
         try:
-            proc = subprocess.run(
+            proc = subprocess.run(  # nosec B602
                 cmd,
                 shell=True,
                 capture_output=True,
@@ -159,13 +159,15 @@ def run_command(cmd: Sequence[str] | str, timeout: int = COMMAND_TIMEOUT, cwd: O
             }
         except subprocess.TimeoutExpired as exc:
             return {"status": "timed out", "stdout": exc.stdout or "", "stderr": exc.stderr or ""}
+        except (OSError, subprocess.SubprocessError) as exc:
+            return {"status": "error", "stdout": "", "stderr": str(exc)}
     else:
         if not cmd:
             return {"status": "invalid", "stdout": "", "stderr": ""}
         if not tool_available(cmd[0]):
             return {"status": "tool not found", "stdout": "", "stderr": ""}
         try:
-            proc = subprocess.run(
+            proc = subprocess.run(  # nosec B603
                 cmd,
                 capture_output=True,
                 text=True,
@@ -179,6 +181,8 @@ def run_command(cmd: Sequence[str] | str, timeout: int = COMMAND_TIMEOUT, cwd: O
             }
         except subprocess.TimeoutExpired as exc:
             return {"status": "timed out", "stdout": exc.stdout or "", "stderr": exc.stderr or ""}
+        except (OSError, subprocess.SubprocessError) as exc:
+            return {"status": "error", "stdout": "", "stderr": str(exc)}
 
 
 def truncate_output(text: str, max_lines: int = 100, head: int = 50, tail: int = 10) -> str:
@@ -195,15 +199,29 @@ def truncate_lines(text: str, max_lines: int = 100) -> str:
     return "\n".join([*lines[:max_lines], "...<truncated>..."])
 
 
-def flag_like_strings(outputs: Dict[str, Dict[str, str]]) -> List[str]:
-    pattern = re.compile(r"(flag|ctf)\{[^}]{4,120}\}", re.IGNORECASE)
-    found: List[str] = []
-    for tool, res in outputs.items():
+def flag_like_strings(outputs: dict[str, dict[str, str]]) -> list[str]:
+    pattern = re.compile(r"(?:flag|ctf)\{[^}]{4,120}\}", re.IGNORECASE)
+    found: list[str] = []
+    for _tool, res in outputs.items():
         for text in (res.get("stdout", ""), res.get("stderr", "")):
             for match in pattern.findall(text):
                 if match not in found:
                     found.append(match)
     return found
+
+
+def safe_report_stem(target_name: str) -> str:
+    """Build a cross-platform report stem from a path, URL, or host:port."""
+    parsed = urlparse(target_name)
+    if parsed.scheme and parsed.netloc:
+        raw = "_".join(part for part in [parsed.netloc, parsed.path.strip("/")] if part)
+    elif parse_host_port(target_name):
+        host, port = parse_host_port(target_name) or ("target", 0)
+        raw = f"{host}_{port}"
+    else:
+        raw = Path(target_name).stem or target_name
+    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "_", raw).strip("._-")
+    return cleaned[:80] or "target"
 
 
 def clean_json(text: str) -> str:
@@ -215,8 +233,8 @@ def clean_json(text: str) -> str:
     return match.group(0) if match else cleaned
 
 
-def extract_symbols(outputs: Dict[str, Dict[str, str]]) -> List[str]:
-    symbols: List[str] = []
+def extract_symbols(outputs: dict[str, dict[str, str]]) -> list[str]:
+    symbols: list[str] = []
     nm_out = outputs.get("nm", {}).get("stdout", "")
     rabin_out = outputs.get("rabin2_symbols", {}).get("stdout", "")
     for text in (nm_out, rabin_out):
@@ -234,8 +252,8 @@ def top_lines(text: str, max_lines: int = 10) -> str:
     return "\n".join(lines[:max_lines])
 
 
-def suspicious_strings(outputs: Dict[str, Dict[str, str]]) -> List[str]:
-    hits: List[str] = []
+def suspicious_strings(outputs: dict[str, dict[str, str]]) -> list[str]:
+    hits: list[str] = []
     keywords = ["flag", "ctf", "secret", "password", "key"]
     for name in ["strings_grep", "strings_full"]:
         text = outputs.get(name, {}).get("stdout", "")
@@ -249,7 +267,7 @@ def suspicious_strings(outputs: Dict[str, Dict[str, str]]) -> List[str]:
     return hits
 
 
-def call_llm(prompt: str) -> Tuple[Optional[str], str]:
+def call_llm(prompt: str) -> tuple[str | None, str]:
     """Call NVIDIA NIM backend; return (text, status) where status notes failures."""
     api_key = os.getenv("NVIDIA_API_KEY")
     if not api_key:
@@ -270,7 +288,7 @@ def call_llm(prompt: str) -> Tuple[Optional[str], str]:
             max_tokens=1024,
             stream=True,
         )
-        chunks: List[str] = []
+        chunks: list[str] = []
         for chunk in completion:
             delta = chunk.choices[0].delta.content
             if delta:
@@ -280,7 +298,11 @@ def call_llm(prompt: str) -> Tuple[Optional[str], str]:
         return None, "error"
 
 
-def select_commands_with_llm(category: str, target: str, cmds: List[Tuple[str, Sequence[str] | str, int]]) -> List[Tuple[str, Sequence[str] | str, int]]:
+def select_commands_with_llm(
+    category: str,
+    target: str,
+    cmds: list[tuple[str, Sequence[str] | str, int]],
+) -> list[tuple[str, Sequence[str] | str, int]]:
     """Ask LLM to pick commands; fallback to full list on any issue."""
     prompt_lines = [
         "You are selecting recon commands for a CTF challenge.",
@@ -298,7 +320,7 @@ def select_commands_with_llm(category: str, target: str, cmds: List[Tuple[str, S
         return cmds
     try:
         payload = json.loads(clean_json(raw))
-        selected: List[str] = payload.get("commands", []) if isinstance(payload, dict) else []
+        selected: list[str] = payload.get("commands", []) if isinstance(payload, dict) else []
         if not selected:
             return cmds
         chosen = [item for item in cmds if item[0] in selected]
@@ -307,8 +329,16 @@ def select_commands_with_llm(category: str, target: str, cmds: List[Tuple[str, S
         return cmds
 
 
-def gather_commands(category: str, target: str, is_url_target: bool, net_mode: bool, host_port: Optional[Tuple[str, int]], magic_desc: Optional[str]) -> List[Tuple[str, Sequence[str] | str, int]]:
-    cmds: List[Tuple[str, Sequence[str] | str, int]] = []
+def gather_commands(
+    category: str,
+    target: str,
+    is_url_target: bool,
+    net_mode: bool,
+    host_port: tuple[str, int] | None,
+    magic_desc: str | None,
+    allow_execution: bool = False,
+) -> list[tuple[str, Sequence[str] | str, int]]:
+    cmds: list[tuple[str, Sequence[str] | str, int]] = []
 
     if net_mode and host_port:
         host, port = host_port
@@ -318,7 +348,7 @@ def gather_commands(category: str, target: str, is_url_target: bool, net_mode: b
         ])
         return cmds
 
-    always_file_cmds: List[Tuple[str, str]] = [
+    always_file_cmds: list[tuple[str, str]] = [
         ("file", f"file {shlex.quote(target)}"),
         ("strings_grep", f"strings {shlex.quote(target)} | grep -i 'flag\\|ctf\\|key\\|password\\|secret'"),
         ("xxd_head", f"xxd {shlex.quote(target)} | head -40"),
@@ -338,7 +368,7 @@ def gather_commands(category: str, target: str, is_url_target: bool, net_mode: b
     elif file_size > 0 and is_text_like:
         always_file_cmds.insert(1, ("source_head", f"sed -n '1,200p' {shlex.quote(target)}"))
 
-    always_url_cmds: List[Tuple[str, str]] = [
+    always_url_cmds: list[tuple[str, str]] = [
         ("curl_head", f"curl -I {shlex.quote(target)}"),
     ]
 
@@ -353,10 +383,16 @@ def gather_commands(category: str, target: str, is_url_target: bool, net_mode: b
                 ("checksec", ["checksec", f"--file={target}"], COMMAND_TIMEOUT),
                 ("readelf", ["readelf", "-a", target], COMMAND_TIMEOUT),
                 ("nm", ["nm", target], COMMAND_TIMEOUT),
-                ("ltrace", ["ltrace", f"./{Path(target).name}"], EXEC_TIMEOUT),
-                ("strace", ["strace", f"./{Path(target).name}"], EXEC_TIMEOUT),
             ]
         )
+        if allow_execution:
+            executable_target = str(Path(target).resolve())
+            cmds.extend(
+                [
+                    ("ltrace", ["ltrace", executable_target], EXEC_TIMEOUT),
+                    ("strace", ["strace", executable_target], EXEC_TIMEOUT),
+                ]
+            )
     if category in {"forensics"}:
         cmds.extend(
             [
@@ -368,6 +404,31 @@ def gather_commands(category: str, target: str, is_url_target: bool, net_mode: b
             ]
         )
     if category in {"crypto"}:
+        encoding_script = textwrap.dedent(
+            """
+            import base64
+            import binascii
+            import codecs
+            import sys
+            from pathlib import Path
+
+            data = Path(sys.argv[1]).read_bytes()
+            print("len", len(data))
+            try:
+                print("base64?", base64.b64decode(data, validate=True)[:80])
+            except Exception as exc:
+                print("base64? no", exc)
+            try:
+                print("hex?", binascii.unhexlify(data.strip())[:80])
+            except Exception as exc:
+                print("hex? no", exc)
+            try:
+                decoded = codecs.decode(data.decode(errors="ignore"), "rot_13")
+                print("rot13 sample:", decoded[:120])
+            except Exception as exc:
+                print("rot13? no", exc)
+            """
+        ).strip()
         cmds.extend(
             [
                 ("openssl_asn1", f"openssl asn1parse -in {shlex.quote(target)}", COMMAND_TIMEOUT),
@@ -375,7 +436,7 @@ def gather_commands(category: str, target: str, is_url_target: bool, net_mode: b
                 ("xxd_full", f"xxd {shlex.quote(target)}", COMMAND_TIMEOUT),
                 (
                     "python_detect_encoding",
-                    "python3 - <<'PY'\nimport sys, codecs, base64, binascii\nfrom pathlib import Path\ndata = Path(sys.argv[1]).read_bytes()\nprint('len', len(data))\ntry:\n    print('base64?', base64.b64decode(data, validate=True)[:80])\nexcept Exception as e:\n    print('base64? no', e)\ntry:\n    print('hex?', binascii.unhexlify(data.strip())[:80])\nexcept Exception as e:\n    print('hex? no', e)\ntry:\n    decoded = codecs.decode(data.decode(errors='ignore'), 'rot_13')\n    print('rot13 sample:', decoded[:120])\nexcept Exception as e:\n    print('rot13? no', e)\nPY\n" + shlex.quote(target),
+                    f"python3 - {shlex.quote(target)} <<'PY'\n{encoding_script}\nPY",
                     COMMAND_TIMEOUT,
                 ),
             ]
@@ -384,7 +445,11 @@ def gather_commands(category: str, target: str, is_url_target: bool, net_mode: b
         cmds.extend(
             [
                 ("curl_headers", f"curl -I {shlex.quote(target)}", COMMAND_TIMEOUT),
-                ("curl_grep", f"curl -s {shlex.quote(target)} | grep -i 'flag\\|comment\\|todo\\|key'", COMMAND_TIMEOUT),
+                (
+                    "curl_grep",
+                    f"curl -s {shlex.quote(target)} | grep -i 'flag\\|comment\\|todo\\|key'",
+                    COMMAND_TIMEOUT,
+                ),
                 ("whatweb", ["whatweb", target], COMMAND_TIMEOUT),
                 ("robots", f"curl {shlex.quote(target)}/robots.txt", COMMAND_TIMEOUT),
                 ("git_head", f"curl {shlex.quote(target)}/.git/HEAD", COMMAND_TIMEOUT),
@@ -395,7 +460,11 @@ def gather_commands(category: str, target: str, is_url_target: bool, net_mode: b
             cmds.extend(
                 [
                     ("tshark_summary", ["tshark", "-r", target, "-q", "-z", "io,phs"], COMMAND_TIMEOUT),
-                    ("tshark_http_uris", ["tshark", "-r", target, "-Y", "http", "-T", "fields", "-e", "http.request.uri"], COMMAND_TIMEOUT),
+                    (
+                        "tshark_http_uris",
+                        ["tshark", "-r", target, "-Y", "http", "-T", "fields", "-e", "http.request.uri"],
+                        COMMAND_TIMEOUT,
+                    ),
                     ("tshark_follow", ["tshark", "-r", target, "-z", "follow,tcp,ascii,0"], COMMAND_TIMEOUT),
                 ]
             )
@@ -411,7 +480,7 @@ def gather_commands(category: str, target: str, is_url_target: bool, net_mode: b
     return cmds
 
 
-def guess_magic(target: str) -> Optional[str]:
+def guess_magic(target: str) -> str | None:
     if is_url(target):
         return None
     if not tool_available("file"):
@@ -422,8 +491,13 @@ def guess_magic(target: str) -> Optional[str]:
     return None
 
 
-def build_observations(target: str, magic_desc: Optional[str], outputs: Dict[str, Dict[str, str]], flag_hits: List[str]) -> List[str]:
-    obs: List[str] = []
+def build_observations(
+    target: str,
+    magic_desc: str | None,
+    outputs: dict[str, dict[str, str]],
+    flag_hits: list[str],
+) -> list[str]:
+    obs: list[str] = []
     if flag_hits:
         obs.append(f"Flag-like strings: {', '.join(flag_hits[:5])}")
     if magic_desc and Path(target).exists():
@@ -448,7 +522,7 @@ def build_observations(target: str, magic_desc: Optional[str], outputs: Dict[str
     return obs
 
 
-def suggested_next_steps(category: str) -> List[str]:
+def suggested_next_steps(category: str) -> list[str]:
     if category == "web":
         return [
             "Enumerate parameters and run dir brute-force (ffuf, gobuster)",
@@ -493,16 +567,16 @@ def suggested_next_steps(category: str) -> List[str]:
 def build_llm_prompt_deep(
     category: str,
     target: str,
-    magic_desc: Optional[str],
+    magic_desc: str | None,
     sha: str,
-    observations: List[str],
-    outputs: Dict[str, Dict[str, str]],
-    challenge_title: Optional[str] = None,
-    challenge_description: Optional[str] = None,
+    observations: list[str],
+    outputs: dict[str, dict[str, str]],
+    challenge_title: str | None = None,
+    challenge_description: str | None = None,
 ) -> str:
     """Build rich prompt with all non-empty recon outputs; limit length."""
 
-    def section_if_ok(name: str, key: str, max_lines: int = 100) -> Optional[str]:
+    def section_if_ok(name: str, key: str, max_lines: int = 100) -> str | None:
         res = outputs.get(key, {})
         if res.get("status") != "ok":
             return None
@@ -511,7 +585,7 @@ def build_llm_prompt_deep(
             return None
         return f"[{name}]\n{truncate_lines(body, max_lines)}"
 
-    sections: List[str] = []
+    sections: list[str] = []
     header = [
         f"Category: {category}",
         f"Target: {target}",
@@ -562,7 +636,7 @@ def build_llm_prompt_deep(
     if net_outputs:
         sections.append("[Network Service Output]\n" + "\n---\n".join(net_outputs))
 
-    web_parts: List[str] = []
+    web_parts: list[str] = []
     for key in ["curl_head", "curl_headers", "curl_grep", "whatweb", "robots", "git_head"]:
         res = outputs.get(key, {})
         if res.get("status") == "ok" and res.get("stdout"):
@@ -579,23 +653,47 @@ def build_llm_prompt_deep(
     if enc.get("status") == "ok" and enc.get("stdout"):
         sections.append("[encoding]\n" + truncate_lines(enc["stdout"], 100))
 
-    instruction = (
-        "You are a CTF analyst. Analyze this recon data and extract:\n"
-        "NEVER guess or fabricate flag values. If you think you know the flag, say 'FLAG RECOVERY REQUIRES: <tool/method>' instead. Only report what is explicitly present in the recon data.\n"
-        "1. VULNERABILITY INDICATORS - any functions, strings, protections, or patterns that suggest a specific vulnerability class\n"
-        "2. KEY FINDINGS - the most important observations from the recon (e.g. dangerous functions present, missing protections, hidden functions, suspicious metadata, encoded data detected)\n"
-        "3. BINARY PROFILE - summarize the target in one paragraph (architecture, protections, purpose, notable symbols)\n"
-        "4. ATTACK SURFACE - list every possible input vector found (argv, stdin, network, files, env vars, format strings etc)\n"
-        "5. RECOMMENDED TOOL SEQUENCE - ordered list of next tools to run with exact commands and expected output\n"
-        "6. SOLVE HYPOTHESIS - your best guess at the intended solution based purely on the evidence in the recon data\n"
-        "Respond with clearly labeled sections 1-6.\n"
+    instruction = "\n".join(
+        [
+            "You are a CTF analyst. Analyze this recon data and extract:",
+            (
+                "NEVER guess or fabricate flag values. If you think you know the flag, say "
+                "'FLAG RECOVERY REQUIRES: <tool/method>' instead. Only report what is explicitly "
+                "present in the recon data."
+            ),
+            (
+                "1. VULNERABILITY INDICATORS - any functions, strings, protections, or patterns "
+                "that suggest a specific vulnerability class"
+            ),
+            (
+                "2. KEY FINDINGS - the most important observations from the recon, such as dangerous "
+                "functions, missing protections, hidden functions, metadata, or encoded data"
+            ),
+            (
+                "3. BINARY PROFILE - summarize the target in one paragraph: architecture, protections, "
+                "purpose, and notable symbols"
+            ),
+            (
+                "4. ATTACK SURFACE - list every possible input vector found: argv, stdin, network, "
+                "files, env vars, format strings, etc"
+            ),
+            "5. RECOMMENDED TOOL SEQUENCE - ordered next commands and expected output",
+            "6. SOLVE HYPOTHESIS - best evidence-based guess at the intended solution",
+            "Respond with clearly labeled sections 1-6.",
+            "",
+        ]
     )
 
     prompt = instruction + "\n" + "\n\n".join(sections)
     return prompt[:12000]
 
 
-def process_target(target: str, args: argparse.Namespace, challenge_title: Optional[str], challenge_description: Optional[str]) -> Dict[str, Any]:
+def process_target(
+    target: str,
+    args: argparse.Namespace,
+    challenge_title: str | None,
+    challenge_description: str | None,
+) -> dict[str, Any]:
     url_mode = is_url(target)
     host_port = None if url_mode else parse_host_port(target)
     net_mode = host_port is not None
@@ -607,7 +705,15 @@ def process_target(target: str, args: argparse.Namespace, challenge_title: Optio
     magic_desc = None if net_mode or url_mode else guess_magic(target)
     category = detect_category(target, args.category, magic_desc, net_mode)
 
-    cmds = gather_commands(category, target, url_mode, net_mode, host_port, magic_desc)
+    cmds = gather_commands(
+        category,
+        target,
+        url_mode,
+        net_mode,
+        host_port,
+        magic_desc,
+        allow_execution=args.allow_execution,
+    )
     cmds = select_commands_with_llm(category, target, cmds)
 
     print(f"[*] Target: {target}")
@@ -615,7 +721,7 @@ def process_target(target: str, args: argparse.Namespace, challenge_title: Optio
     if magic_desc:
         print(f"[*] Magic: {magic_desc}")
 
-    outputs: Dict[str, Dict[str, str]] = {}
+    outputs: dict[str, dict[str, str]] = {}
     for name, cmd, timeout in cmds:
         print(f"[+] Running {name}: {cmd}")
         res = run_command(cmd, timeout=timeout)
@@ -633,10 +739,12 @@ def process_target(target: str, args: argparse.Namespace, challenge_title: Optio
         except Exception:
             sha = "unavailable"
 
-    report_name = f"report_{Path(target_name).stem}.md"
-    report_path = Path(report_name)
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    report_name = f"report_{safe_report_stem(target_name)}.md"
+    report_path = output_dir / report_name
 
-    def format_tool_output(name: str, res: Dict[str, str]) -> str:
+    def format_tool_output(name: str, res: dict[str, str]) -> str:
         if res.get("status") == "tool not found":
             return f"### {name}\n_tool not found_\n"
         if res.get("status") == "timed out":
@@ -651,7 +759,7 @@ def process_target(target: str, args: argparse.Namespace, challenge_title: Optio
         status = res.get("status", "")
         return f"### {name}\nStatus: {status}\n\n```\n{combined}\n```\n"
 
-    md_parts: List[str] = []
+    md_parts: list[str] = []
     md_parts.append(f"# CTF Recon Report — {target_name}")
     md_parts.append(f"**Date:** {ts}")
     md_parts.append(f"**Category:** {category}")
@@ -734,17 +842,22 @@ def process_target(target: str, args: argparse.Namespace, challenge_title: Optio
     }
 
 
-def run_combined_analysis(results: List[Dict[str, Any]], challenge_title: Optional[str], challenge_description: Optional[str]) -> None:
+def run_combined_analysis(
+    results: list[dict[str, Any]],
+    challenge_title: str | None,
+    challenge_description: str | None,
+    output_dir: Path,
+) -> None:
     if not results:
         return
 
-    def snippet(outputs: Dict[str, Dict[str, str]], key: str, max_lines: int = 40) -> Optional[str]:
+    def snippet(outputs: dict[str, dict[str, str]], key: str, max_lines: int = 40) -> str | None:
         res = outputs.get(key, {})
         if res.get("status") == "ok" and res.get("stdout"):
             return truncate_lines(res["stdout"], max_lines)
         return None
 
-    sections: List[str] = []
+    sections: list[str] = []
     header = ["Cross-target correlation for challenge"]
     if challenge_title:
         header.append(f"Title: {challenge_title}")
@@ -753,7 +866,7 @@ def run_combined_analysis(results: List[Dict[str, Any]], challenge_title: Option
     sections.append(" | ".join(header))
 
     for item in results:
-        block: List[str] = []
+        block: list[str] = []
         block.append(f"Target: {item.get('target_name')} (category {item.get('category')})")
         if item.get("magic"):
             block.append(f"Magic: {item['magic']}")
@@ -782,9 +895,10 @@ def run_combined_analysis(results: List[Dict[str, Any]], challenge_title: Option
 
     llm_text, llm_status = call_llm(prompt)
     report_name = "report_combined.md"
-    report_path = Path(report_name)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    report_path = output_dir / report_name
 
-    md_parts: List[str] = []
+    md_parts: list[str] = []
     md_parts.append("# Combined Recon Report")
     if challenge_title:
         md_parts.append(f"**Title:** {challenge_title}")
@@ -813,18 +927,28 @@ def main():
     parser.add_argument("targets", nargs="+", help="File paths, URLs, or host:port targets")
     parser.add_argument("--title", help="Challenge title", dest="challenge_title")
     parser.add_argument("--description", help="Challenge description", dest="challenge_description")
-    parser.add_argument("--category", choices=["crypto", "pwn", "web", "forensics", "rev", "misc"], help="Category hint")
+    parser.add_argument(
+        "--category",
+        choices=["crypto", "pwn", "web", "forensics", "rev", "misc"],
+        help="Category hint",
+    )
     parser.add_argument("--json", dest="json_out", action="store_true", help="Also write JSON report")
+    parser.add_argument("--output-dir", default=".", help="Directory for Markdown/JSON reports")
+    parser.add_argument(
+        "--allow-execution",
+        action="store_true",
+        help="Allow dynamic tracing commands that execute local binaries (disabled by default)",
+    )
     args = parser.parse_args()
 
-    results: List[Dict[str, Any]] = []
+    results: list[dict[str, Any]] = []
     for tgt in args.targets:
         res = process_target(tgt, args, args.challenge_title, args.challenge_description)
         if res:
             results.append(res)
 
     if len(results) > 1:
-        run_combined_analysis(results, args.challenge_title, args.challenge_description)
+        run_combined_analysis(results, args.challenge_title, args.challenge_description, Path(args.output_dir))
 
 if __name__ == "__main__":
     main()

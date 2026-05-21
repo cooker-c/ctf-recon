@@ -1,48 +1,34 @@
-# CTF Recon
+# CTF Recon CLI
 
-LLM-guided recon pipeline for CTF files or URLs. It runs category-aware recon commands, captures stdout/stderr, and writes a Markdown report plus optional JSON for handoff to a stronger LLM.
+This directory contains the installable Python package for CTF Recon.
 
-## Features
-- Auto-detects category (or use `--category`) and picks commands accordingly
-- Runs recon commands with timeouts and skips missing tools gracefully
-- Captures outputs, trims long sections, and summarizes quick observations
-- Writes `report_<target>.md` and optional JSON with `--json`
-- Optional LLM command selection via NVIDIA NIM (env `NVIDIA_API_KEY`)
+For the full project overview, safety notes, and contribution workflow, see the repository [README](../README.md).
 
 ## Quickstart
+
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate            # Linux/Kali
+python -m venv .venv
+source .venv/bin/activate       # Windows PowerShell: .venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
-pip install -e .                     # no required deps
-
-# Optional: enable LLM selection (needs openai client installed)
-pip install 'openai>=1.12.0'
-export NVIDIA_API_KEY="nvapi-..."
+python -m pip install -e .
 ```
-
-## Usage
-```bash
-python3 ctf_recon.py challenge.bin --category pwn
-python3 ctf_recon.py challenge.png              # auto-detects category
-python3 ctf_recon.py http://chal.local --category web
-```
-
-Outputs:
-- Markdown: `report_<name>.md`
-- JSON (optional): `report_<name>.json` when `--json` is set
-
-LLM behavior:
-- If `NVIDIA_API_KEY` is set and `openai` is installed, the LLM suggests a subset of commands to run.
-- If the key is missing or the call fails, all commands run (fallback).
-
-## Notes
-- External tools (strings, file, exiftool, binwalk, etc.) are invoked if present; missing tools are reported as "tool not found" and skipped.
-- Keep your `NVIDIA_API_KEY` out of source control; set it per-shell or via a secrets manager.
 
 ## Examples
+
 ```bash
-python3 ctf_recon.py vuln --category pwn
-python3 ctf_recon.py traffic.pcap --category forensics --json
-python3 ctf_recon.py https://challenge.ctf/site --category web
+ctf-recon challenge.bin --category pwn
+ctf-recon traffic.pcap --category forensics --json --output-dir reports
+ctf-recon https://challenge.ctf/site --category web
+ctf-recon 127.0.0.1:31337 --title "Warmup service"
+```
+
+Dynamic tracing commands that execute local binaries are disabled by default. Use `--allow-execution` only in an isolated CTF VM or container.
+
+## Development
+
+```bash
+python -m pip install -e ".[dev]"
+python -m ruff check .
+python -m pytest -q
+python -m bandit -q -r ctf_recon.py
 ```
